@@ -23,9 +23,9 @@ def contains_kanji(text):
     return any(is_kanji(char) for char in text)
 
 
-def has_numeric_halfwidth_to_fullwidth(original, modified):
+def has_numeric_fullwidth_to_halfwidth(original, modified):
     """
-    Check if numbers changed from half-width to full-width
+    Check if numbers changed from full-width to half-width
     """
     if pd.isna(original) or pd.isna(modified):
         return False
@@ -33,37 +33,125 @@ def has_numeric_halfwidth_to_fullwidth(original, modified):
     original_str = str(original)
     modified_str = str(modified)
 
-    # Create regex pattern to find half-width digits in original
-    hw_digits_pattern = re.compile(r'[0-9]')
+    # Create regex pattern to find full-width digits in original
+    fw_digits_pattern = re.compile(r'[０-９]')
 
-    # Dictionary mapping half-width to full-width digits
-    hw_to_fw_digits = {
-        '0': '０', '1': '１', '2': '２', '3': '３', '4': '４',
-        '5': '５', '6': '６', '7': '７', '8': '８', '9': '９'
+    # Dictionary mapping full-width to half-width digits
+    fw_to_hw_digits = {
+        '０': '0', '１': '1', '２': '2', '３': '3', '４': '4',
+        '５': '5', '６': '6', '７': '7', '８': '8', '９': '9'
     }
 
-    # Find all half-width digits in original
-    hw_digits_matches = hw_digits_pattern.finditer(original_str)
+    # Find all full-width digits in original
+    fw_digits_matches = fw_digits_pattern.finditer(original_str)
 
-    for match in hw_digits_matches:
+    for match in fw_digits_matches:
         idx = match.start()
-        hw_digit = original_str[idx]
+        fw_digit = original_str[idx]
 
-        # Check if this index exists in modified and contains the full-width equivalent
-        if idx < len(modified_str) and modified_str[idx] == hw_to_fw_digits.get(hw_digit):
-            return True
+        # Check if there's a corresponding position in modified text with the half-width equivalent
+        if idx < len(modified_str):
+            # Need to handle cases where the modified text might have katakana replacing some digits
+            if modified_str[idx] == fw_to_hw_digits.get(fw_digit):
+                return True
+            # Look ahead or behind in case there's position shift due to replacements
+            for offset in range(-3, 4):  # Check a few positions before and after
+                pos = idx + offset
+                if 0 <= pos < len(modified_str) and modified_str[pos] == fw_to_hw_digits.get(fw_digit):
+                    return True
 
-    # If we find half-width in original and full-width in modified text at exact positions
+    # If we find full-width in original and half-width in modified text at similar positions
     d = difflib.SequenceMatcher(None, original_str, modified_str)
     for tag, i1, i2, j1, j2 in d.get_opcodes():
         if tag == 'replace':
             orig_chars = original_str[i1:i2]
             mod_chars = modified_str[j1:j2]
 
-            # Check if this replacement includes half-width to full-width digit conversion
-            for i, c1 in enumerate(orig_chars):
-                if i < len(mod_chars) and c1 in hw_to_fw_digits and mod_chars[i] == hw_to_fw_digits[c1]:
+            # Check if this replacement includes full-width to half-width digit conversion
+            for c1 in orig_chars:
+                if c1 in fw_to_hw_digits and fw_to_hw_digits[c1] in mod_chars:
                     return True
+
+    return False
+
+
+def has_symbol_to_kana_conversion(original, modified):
+    """
+    Check if symbols in original are replaced with kana in modified
+    Examples:
+    - "６－２－２－７３４" -> "6メ2-2７３４" (dash replaced with メ)
+    - Half-width dash (-) to kana
+    - Full-width dash (－) to kana
+    """
+    if pd.isna(original) or pd.isna(modified):
+        return False
+
+    original_str = str(original)
+    modified_str = str(modified)
+
+    # Create regex patterns for common symbols - both half-width and full-width
+    symbols_pattern = re.compile(r'[－-／/・]')  # Includes both width variants of dash, slash, dot
+
+    # Dictionary mapping common symbols to possible kana replacements
+    symbol_to_kana_map = {
+        '-': ['メ', 'ノ'],  # Half-width dash potential replacements
+        '－': ['メ', 'ノ'],  # Full-width dash potential replacements
+        '/': ['ノ'],  # Half-width slash potential replacements
+        '／': ['ノ'],  # Full-width slash potential replacements
+        '・': ['ノ'],  # Middle dot potential replacements
+    }
+
+    # Find all symbols in original
+    symbol_matches = symbols_pattern.finditer(original_str)
+
+    for match in symbol_matches:
+        idx = match.start()
+        symbol = original_str[idx]
+
+        # Potential kana replacements for this symbol
+        potential_kana = symbol_to_kana_map.get(symbol, [])
+
+        # Check if this position in modified has a kana character
+        if idx < len(modified_str):
+            # Direct position check
+            if idx < len(modified_str) and re.match(r'[\u3040-\u309F\u30A0-\u30FF]', modified_str[idx]):
+                # If it's one of our expected kana replacements, it's very likely a conversion
+                if modified_str[idx] in potential_kana:
+                    return True
+                # Otherwise, it's still possibly a conversion
+                return True
+
+            # Check nearby positions in case of alignment shifts
+            for offset in range(-3, 4):
+                pos = idx + offset
+                if 0 <= pos < len(modified_str):
+                    if re.match(r'[\u3040-\u309F\u30A0-\u30FF]', modified_str[pos]):
+                        # If it's one of our expected kana replacements, it's very likely a conversion
+                        if modified_str[pos] in potential_kana:
+                            return True
+
+    # Look at the diff to find symbol-to-kana replacements
+    d = difflib.SequenceMatcher(None, original_str, modified_str)
+    for tag, i1, i2, j1, j2 in d.get_opcodes():
+        if tag == 'replace':
+            orig_chars = original_str[i1:i2]
+            mod_chars = modified_str[j1:j2]
+
+            # Check if original contains symbols and modified contains kana
+            if re.search(r'[－-／/・]', orig_chars) and re.search(r'[\u3040-\u309F\u30A0-\u30FF]', mod_chars):
+                # Specific case check: any dash replaced with メ or ノ
+                dash_symbols = ['-', '－']
+                slash_symbols = ['/', '／']
+                dot_symbols = ['・']
+
+                if any(sym in orig_chars for sym in dash_symbols) and any(k in mod_chars for k in ['メ', 'ノ']):
+                    return True
+                if any(sym in orig_chars for sym in slash_symbols) and 'ノ' in mod_chars:
+                    return True
+                if any(sym in orig_chars for sym in dot_symbols) and 'ノ' in mod_chars:
+                    return True
+                # Generic case
+                return True
 
     return False
 
@@ -101,13 +189,15 @@ def compare_addresses(original, modified):
 
     # Check for half-width vs full-width character differences
     def is_only_width_different(str1, str2):
-        # Maps for half-width to full-width conversions
+        # Maps for half-width to full-width conversions and vice versa
         hw_to_fw = {
             '0': '０', '1': '１', '2': '２', '3': '３', '4': '４',
             '5': '５', '6': '６', '7': '７', '8': '８', '9': '９',
             '-': 'ー', '.': '．', '(': '（', ')': '）', ' ': '　',
             '/': '／', ',': '，', ':': '：'
         }
+
+        fw_to_hw = {v: k for k, v in hw_to_fw.items()}
 
         # If lengths are different, can't be just width difference
         if len(str1) != len(str2):
@@ -118,8 +208,8 @@ def compare_addresses(original, modified):
             if c1 == c2:
                 continue
 
-            # Check if it's a half-width to full-width conversion
-            if hw_to_fw.get(c1) == c2 or hw_to_fw.get(c2) == c1:
+            # Check if it's a width conversion (either direction)
+            if hw_to_fw.get(c1) == c2 or fw_to_hw.get(c1) == c2:
                 continue
 
             # If we get here, found a difference that isn't just width
@@ -128,43 +218,17 @@ def compare_addresses(original, modified):
         # If we get through the whole string, it's only width differences
         return True
 
-    # Check for specific encoding differences
-    if is_only_width_different(original, modified):
-        # Get the specific characters that differ
-        diff_pairs = []
-        for i, (c1, c2) in enumerate(zip(original, modified)):
-            if c1 != c2:
-                diff_pairs.append(f"Position {i}: '{c1}' → '{c2}'")
-
-        return f"Only half-width/full-width differences: {'; '.join(diff_pairs[:3])}" + \
-            (f"; and {len(diff_pairs) - 3} more" if len(diff_pairs) > 3 else "")
-
     # Check for unicode normalization differences
     if unicodedata.normalize('NFKC', original) == unicodedata.normalize('NFKC', modified):
         return "Unicode normalization difference"
 
-    # Check for hidden/invisible characters
-    def contains_invisible(text):
-        invisible_chars = [
-            '\u200B', '\u200C', '\u200D', '\u2060',  # Zero-width spaces/joiners
-            '\u00A0', '\u2000', '\u2001', '\u2002', '\u2003',  # Various spaces
-            '\u2028', '\u2029',  # Line/paragraph separators
-            '\uFEFF'  # BOM
-        ]
-        return any(c in text for c in invisible_chars)
+    # Check for symbol to kana conversion
+    if has_symbol_to_kana_conversion(original, modified):
+        return "Symbol to kana conversion (e.g., dash to メ)"
 
-    if contains_invisible(original) or contains_invisible(modified):
-        # Try to find and highlight invisible characters
-        original_invisible = [f"Pos {i}: {ord(c)}" for i, c in enumerate(original)
-                              if c in ['\u200B', '\u200C', '\u200D', '\u2060', '\u00A0',
-                                       '\u2000', '\u2001', '\u2002', '\u2003', '\u2028',
-                                       '\u2029', '\uFEFF']]
-        modified_invisible = [f"Pos {i}: {ord(c)}" for i, c in enumerate(modified)
-                              if c in ['\u200B', '\u200C', '\u200D', '\u2060', '\u00A0',
-                                       '\u2000', '\u2001', '\u2002', '\u2003', '\u2028',
-                                       '\u2029', '\uFEFF']]
-
-        return f"Contains invisible characters - Original: {original_invisible if original_invisible else 'none'}, Modified: {modified_invisible if modified_invisible else 'none'}"
+    # Check for full-width to half-width numeric conversion
+    if has_numeric_fullwidth_to_halfwidth(original, modified):
+        return "Full-width to half-width numeric conversion"
 
     try:
         # Generate detailed diff using SequenceMatcher
@@ -209,10 +273,6 @@ def main():
         # Print column names to verify
         print("Column names in the file:", df.columns.tolist())
 
-        # Add a column to track exact() function behavior
-        # First apply Excel's EXACT() logic by checking binary equality
-        import numpy as np
-
         # Make sure we're using the correct column names
         # Based on your updated column description
         no_column = 'No.'  # Column A
@@ -243,10 +303,22 @@ def main():
             axis=1
         )
 
-        # Add new columns for kanji detection and half-width to full-width numeric conversion
+        # Count blank entries in 住所カナ2
+        df['kana2_is_blank'] = df[kana2_column].isna()
+        kana2_blank_count = df['kana2_is_blank'].sum()
+
+        # Add new columns for kanji detection
         df['contains_kanji'] = df[kana2_column].apply(contains_kanji)
-        df['numeric_halfwidth_to_fullwidth'] = df.apply(
-            lambda row: has_numeric_halfwidth_to_fullwidth(row[kana1_column], row[kana2_column]),
+
+        # Add new column for numeric fullwidth-to-halfwidth conversion
+        df['numeric_fullwidth_to_halfwidth'] = df.apply(
+            lambda row: has_numeric_fullwidth_to_halfwidth(row[kana1_column], row[kana2_column]),
+            axis=1
+        )
+
+        # Add new column for symbol-to-kana conversion
+        df['symbol_to_kana'] = df.apply(
+            lambda row: has_symbol_to_kana_conversion(row[kana1_column], row[kana2_column]),
             axis=1
         )
 
@@ -265,15 +337,18 @@ def main():
         excel_diff_count = (~df['excel_exact']).sum()
         python_diff_count = df['has_changed'].sum()
         kanji_count = df['contains_kanji'].sum()
-        numeric_hw_to_fw_count = df['numeric_halfwidth_to_fullwidth'].sum()
+        numeric_fw_to_hw_count = df['numeric_fullwidth_to_halfwidth'].sum()
+        symbol_to_kana_count = df['symbol_to_kana'].sum()
         choume_count = df['contains_choume'].sum()
         chou_count = df['contains_chou'].sum()
 
         print(f"\nExcel EXACT() would find {excel_diff_count} differences")
         print(f"Python string comparison finds {python_diff_count} differences")
         print(f"Difference: {excel_diff_count - python_diff_count} rows have subtle encoding differences")
+        print(f"Found {kana2_blank_count} rows where 住所カナ2 is blank")
         print(f"Found {kanji_count} rows where 住所カナ2 contains kanji")
-        print(f"Found {numeric_hw_to_fw_count} rows where numbers changed from half-width to full-width")
+        print(f"Found {numeric_fw_to_hw_count} rows where numbers changed from full-width to half-width")
+        print(f"Found {symbol_to_kana_count} rows where symbols changed to kana characters")
         print(f"Found {choume_count} rows where 住所カナ2 contains 'チョウメ'")
         print(f"Found {chou_count} rows where 住所カナ2 contains 'チョウ' (excluding rows with 'チョウメ')")
 
@@ -290,8 +365,57 @@ def main():
 
         print(f"Analysis complete. Found {total_changes} changes out of {len(df)} addresses.")
 
-        # Analyze types of changes
-        print("\nSummarizing types of changes...")
+        # Add detection for symbol width changes (half-width to full-width and vice versa)
+        def has_symbol_width_change(original, modified):
+            """
+            Check if symbols changed width (half-width to full-width or vice versa)
+            Example: "-" to "－" or "／" to "/"
+            """
+            if pd.isna(original) or pd.isna(modified):
+                return False
+
+            original_str = str(original)
+            modified_str = str(modified)
+
+            # Symbol mapping between half-width and full-width
+            symbol_width_map = {
+                '-': '－',  # Half-width to full-width dash
+                '/': '／',  # Half-width to full-width slash
+                '.': '．',  # Half-width to full-width period
+                ',': '，',  # Half-width to full-width comma
+                '(': '（',  # Half-width to full-width parenthesis
+                ')': '）'  # Half-width to full-width parenthesis
+            }
+            # Add reverse mapping
+            symbol_width_map.update({v: k for k, v in symbol_width_map.items()})
+
+            # Look for direct symbol width changes
+            for i, char in enumerate(original_str):
+                if i < len(modified_str) and char in symbol_width_map and modified_str[i] == symbol_width_map[char]:
+                    return True
+
+            # Check the diff for width changes
+            d = difflib.SequenceMatcher(None, original_str, modified_str)
+            for tag, i1, i2, j1, j2 in d.get_opcodes():
+                if tag == 'replace':
+                    orig_chars = original_str[i1:i2]
+                    mod_chars = modified_str[j1:j2]
+
+                    for oc, mc in zip(orig_chars, mod_chars):
+                        if oc in symbol_width_map and mc == symbol_width_map[oc]:
+                            return True
+
+            return False
+
+        # Add the new detection to dataframe
+        df['symbol_width_change'] = df.apply(
+            lambda row: has_symbol_width_change(row[kana1_column], row[kana2_column]),
+            axis=1
+        )
+        symbol_width_change_count = df['symbol_width_change'].sum()
+
+        print(
+            f"Found {symbol_width_change_count} rows where symbols changed width (half-width to full-width or vice versa)")
 
         # Initialize counters for different types of changes
         change_types = {
@@ -300,15 +424,11 @@ def main():
             'replaced': 0,  # Text replaced with something else
             'numeric_added': 0,  # Numbers added
             'symbols_added': 0,  # Symbols added (like -, —, etc.)
-            'format_change': 0,  # Same content but different format (e.g., "6-2" vs "６ー２")
-            'whitespace_only': 0,  # Only whitespace differences
-            'half_full_width_only': 0,  # Only half/full-width character differences
-            'unicode_normalization': 0,  # Unicode normalization differences
-            'invisible_characters': 0,  # Invisible/hidden character differences
-            'exact_match_in_python': 0,  # No difference detected in Python but different in Excel
+            'kana2_is_blank': kana2_blank_count,  # Number of rows where 住所カナ2 is blank
             'contains_kanji': kanji_count,  # Number of rows where 住所カナ2 contains kanji
-            'numeric_halfwidth_to_fullwidth': numeric_hw_to_fw_count,
-            # Number of rows with half to full-width conversion
+            'numeric_fullwidth_to_halfwidth': numeric_fw_to_hw_count,  # Fullwidth to halfwidth numeric conversion
+            'symbol_to_kana': symbol_to_kana_count,  # Symbol to kana conversion
+            'symbol_width_change': symbol_width_change_count,  # Symbol width changes (half to full or vice versa)
             'contains_choume': choume_count,  # Number of rows where 住所カナ2 contains 'チョウメ'
             'contains_chou': chou_count  # Number of rows where 住所カナ2 contains 'チョウ' (excluding rows with 'チョウメ')
         }
@@ -333,21 +453,8 @@ def main():
                 if pd.isna(diff_text) or 'Error' in diff_text:
                     continue
 
-                # Count specific types of encoding differences
-                if 'half-width/full-width differences' in diff_text:
-                    change_types['half_full_width_only'] += 1
-
-                elif 'Whitespace difference' in diff_text:
-                    change_types['whitespace_only'] += 1
-
-                elif 'Unicode normalization difference' in diff_text:
-                    change_types['unicode_normalization'] += 1
-
-                elif 'invisible characters' in diff_text:
-                    change_types['invisible_characters'] += 1
-
                 # Count substantive differences
-                elif 'Added:' in diff_text:
+                if 'Added:' in diff_text:
                     change_types['added'] += 1
                     # Check if added content contains numbers
                     if re.search(r'[0-9０-９]', diff_text):
@@ -361,50 +468,6 @@ def main():
 
                 elif 'Changed:' in diff_text:
                     change_types['replaced'] += 1
-                    # Check if it's just a format change (half-width to full-width or vice versa)
-                    if re.search(r"Changed: '[-0-9]+' → '[－０-９]+'", diff_text) or \
-                            re.search(r"Changed: '[－０-９]+' → '[-0-9]+'", diff_text):
-                        change_types['format_change'] += 1
-
-            else:
-                # This should never happen if our comparison is correct,
-                # but count cases where Python thinks they're the same but they differ in Excel
-                change_types['exact_match_in_python'] += 1
-
-        # For the rows that Excel finds different but Python doesn't, analyze further
-        if excel_diff_count > python_diff_count:
-            print("\nAnalyzing subtle encoding differences that Excel EXACT() would detect but Python missed...")
-
-            # Sample a few rows with subtle differences
-            subtle_diff_rows = df[df['excel_python_diff']].head(5)
-
-            for idx, row in subtle_diff_rows.iterrows():
-                orig = row[kana1_column]
-                mod = row[kana2_column]
-
-                print(f"\nRow {idx}:")
-                print(f"カナ1: {orig}")
-                print(f"カナ2: {mod}")
-                print(f"Length カナ1: {len(str(orig))}, Length カナ2: {len(str(mod))}")
-
-                # Compare character codes
-                orig_codes = [f"{c}({ord(c)})" for c in str(orig)]
-                mod_codes = [f"{c}({ord(c)})" for c in str(mod)]
-
-                # Only show differences in character codes
-                code_diffs = []
-                for i, (o, m) in enumerate(zip(orig_codes, mod_codes)):
-                    if o != m:
-                        code_diffs.append(f"Position {i}: {o} vs {m}")
-
-                if code_diffs:
-                    print("Character code differences:")
-                    for diff in code_diffs[:5]:  # Limit to first 5 differences
-                        print(f"  {diff}")
-                    if len(code_diffs) > 5:
-                        print(f"  ...and {len(code_diffs) - 5} more differences")
-                else:
-                    print("No character code differences found despite binary inequality")
 
         # Detailed analysis of rows containing kanji in 住所カナ2
         if kanji_count > 0:
@@ -425,12 +488,12 @@ def main():
                 kanji_chars = [c for c in str(mod) if is_kanji(c)]
                 print(f"Kanji characters found: {kanji_chars}")
 
-        # Detailed analysis of numeric half-width to full-width conversions
-        if numeric_hw_to_fw_count > 0:
-            print(f"\nAnalyzing {numeric_hw_to_fw_count} rows where numbers changed from half-width to full-width...")
+        # Detailed analysis of full-width to half-width numeric conversions
+        if numeric_fw_to_hw_count > 0:
+            print(f"\nAnalyzing {numeric_fw_to_hw_count} rows where numbers changed from full-width to half-width...")
 
             # Sample a few rows with numeric conversions
-            numeric_rows = df[df['numeric_halfwidth_to_fullwidth']].head(5)
+            numeric_rows = df[df['numeric_fullwidth_to_halfwidth']].head(5)
 
             for idx, row in numeric_rows.iterrows():
                 orig = row[kana1_column]
@@ -440,65 +503,38 @@ def main():
                 print(f"カナ1: {orig}")
                 print(f"カナ2: {mod}")
 
-                # Find half-width digits in original
-                hw_digits = re.findall(r'[0-9]', str(orig))
-                # Find full-width digits in modified
-                fw_digits = re.findall(r'[０-９]', str(mod))
+                # Find full-width digits in original
+                fw_digits = re.findall(r'[０-９]', str(orig))
+                # Find half-width digits in modified
+                hw_digits = re.findall(r'[0-9]', str(mod))
 
-                print(f"Half-width digits in カナ1: {hw_digits}")
-                print(f"Full-width digits in カナ2: {fw_digits}")
+                print(f"Full-width digits in カナ1: {fw_digits}")
+                print(f"Half-width digits in カナ2: {hw_digits}")
 
-        # Detailed analysis of rows containing 'チョウメ'
-        if choume_count > 0:
-            print(f"\nAnalyzing {choume_count} rows where 住所カナ2 contains 'チョウメ'...")
+        # Detailed analysis of symbol-to-kana conversions
+        if symbol_to_kana_count > 0:
+            print(f"\nAnalyzing {symbol_to_kana_count} rows where symbols changed to kana characters...")
 
-            # Sample a few rows with 'チョウメ'
-            choume_rows = df[df['contains_choume']].head(5)
+            # Sample a few rows with symbol-to-kana conversions
+            symbol_rows = df[df['symbol_to_kana']].head(5)
 
-            for idx, row in choume_rows.iterrows():
+            for idx, row in symbol_rows.iterrows():
+                orig = row[kana1_column]
                 mod = row[kana2_column]
 
                 print(f"\nRow {idx}:")
+                print(f"カナ1: {orig}")
                 print(f"カナ2: {mod}")
 
-                # Find the position of 'チョウメ'
-                match = re.search(r'チョウメ', str(mod))
-                if match:
-                    start_pos = match.start()
-                    end_pos = match.end()
-                    print(f"'チョウメ' found at positions {start_pos}-{end_pos}")
+                # Find symbols in original
+                symbols = re.findall(r'[－-]', str(orig))
+                # Find kana in modified that might have replaced symbols
+                kana = re.findall(r'[\u3040-\u309F\u30A0-\u30FF]', str(mod))
 
-                    # Try to get some context around 'チョウメ'
-                    start_context = max(0, start_pos - 10)
-                    end_context = min(len(str(mod)), end_pos + 10)
-                    print(f"Context: ...{str(mod)[start_context:end_context]}...")
+                print(f"Symbols in カナ1: {symbols}")
+                print(f"Kana in カナ2 that might have replaced symbols: {kana}")
 
-        # Detailed analysis of rows containing 'チョウ' (but not 'チョウメ')
-        if chou_count > 0:
-            print(f"\nAnalyzing {chou_count} rows where 住所カナ2 contains 'チョウ' (excluding 'チョウメ')...")
-
-            # Sample a few rows with 'チョウ'
-            chou_rows = df[df['contains_chou']].head(5)
-
-            for idx, row in chou_rows.iterrows():
-                mod = row[kana2_column]
-
-                print(f"\nRow {idx}:")
-                print(f"カナ2: {mod}")
-
-                # Find the position of 'チョウ'
-                match = re.search(r'チョウ', str(mod))
-                if match:
-                    start_pos = match.start()
-                    end_pos = match.end()
-                    print(f"'チョウ' found at positions {start_pos}-{end_pos}")
-
-                    # Try to get some context around 'チョウ'
-                    start_context = max(0, start_pos - 10)
-                    end_context = min(len(str(mod)), end_pos + 10)
-                    print(f"Context: ...{str(mod)[start_context:end_context]}...")
-
-        # Create a summary dataframe
+        # Create a summary dataframe with the requested changes
         summary_df = pd.DataFrame({
             'Change Type': list(change_types.keys()),
             'Count': list(change_types.values()),
@@ -509,66 +545,18 @@ def main():
         print("\nChange Type Summary:")
         print(summary_df)
 
-        # Add supplementary analysis to identify invisible characters
-        print("\nChecking for invisible characters in all data...")
-
-        def detect_invisible_chars(text):
-            if pd.isna(text):
-                return []
-
-            text = str(text)
-            invisible_chars = {
-                '\u200B': 'Zero Width Space',
-                '\u200C': 'Zero Width Non-Joiner',
-                '\u200D': 'Zero Width Joiner',
-                '\u2060': 'Word Joiner',
-                '\u00A0': 'Non-Breaking Space',
-                '\u2028': 'Line Separator',
-                '\u2029': 'Paragraph Separator',
-                '\uFEFF': 'Byte Order Mark',
-                '\u3000': 'Ideographic Space',
-            }
-
-            found = []
-            for i, char in enumerate(text):
-                if char in invisible_chars:
-                    found.append(f"Position {i}: {invisible_chars[char]} (U+{ord(char):04X})")
-            return found
-
-        # Check both columns for invisible characters
-        invisible_in_kana1 = df[kana1_column].apply(detect_invisible_chars)
-        invisible_in_kana2 = df[kana2_column].apply(detect_invisible_chars)
-
-        # Count rows with invisible characters
-        rows_with_invisible = (invisible_in_kana1.apply(len) > 0) | (invisible_in_kana2.apply(len) > 0)
-        invisible_count = rows_with_invisible.sum()
-
-        if invisible_count > 0:
-            print(f"Found {invisible_count} rows with invisible characters")
-
-            # Add to summary
-            if 'invisible_characters' in change_types:
-                change_types['invisible_characters'] = invisible_count
-
-            # Create a sheet with examples of rows with invisible characters
-            invisible_examples = df[rows_with_invisible].head(100).copy()
-            invisible_examples['invisible_in_kana1'] = invisible_in_kana1[rows_with_invisible].head(100)
-            invisible_examples['invisible_in_kana2'] = invisible_in_kana2[rows_with_invisible].head(100)
-
-        # Create a special analysis for encoding differences
+        # Create a modified encoding analysis dataframe
         encoding_analysis = pd.DataFrame({
             'Analysis Type': [
                 'Total Rows',
                 'Differences detected by Excel EXACT()',
                 'Differences detected by Python comparison',
                 'Subtle encoding differences (detected by Excel but not Python)',
-                'Half-width/Full-width character differences',
-                'Whitespace differences',
-                'Unicode normalization differences',
-                'Invisible character differences',
-                'Character code differences',
+                'Rows where 住所カナ2 is blank',
                 'Rows where 住所カナ2 contains kanji',
-                'Rows where numbers changed from half-width to full-width',
+                'Rows where numbers changed from full-width to half-width',
+                'Rows where symbols changed to kana characters',
+                'Rows where symbols changed width (half to full or vice versa)',
                 'Rows where 住所カナ2 contains チョウメ',
                 'Rows where 住所カナ2 contains チョウ (excluding チョウメ)'
             ],
@@ -577,14 +565,11 @@ def main():
                 excel_diff_count,
                 python_diff_count,
                 excel_diff_count - python_diff_count,
-                change_types['half_full_width_only'],
-                change_types['whitespace_only'],
-                change_types['unicode_normalization'],
-                change_types['invisible_characters'],
-                sum(change_types[k] for k in ['half_full_width_only', 'whitespace_only',
-                                              'unicode_normalization', 'invisible_characters']),
+                kana2_blank_count,
                 kanji_count,
-                numeric_hw_to_fw_count,
+                numeric_fw_to_hw_count,
+                symbol_to_kana_count,
+                symbol_width_change_count,
                 choume_count,
                 chou_count
             ],
@@ -593,34 +578,45 @@ def main():
                 f"{(excel_diff_count / len(df) * 100):.2f}%",
                 f"{(python_diff_count / len(df) * 100):.2f}%",
                 f"{((excel_diff_count - python_diff_count) / len(df) * 100):.2f}%",
-                f"{(change_types['half_full_width_only'] / max(excel_diff_count, 1) * 100):.2f}%",
-                f"{(change_types['whitespace_only'] / max(excel_diff_count, 1) * 100):.2f}%",
-                f"{(change_types['unicode_normalization'] / max(excel_diff_count, 1) * 100):.2f}%",
-                f"{(change_types['invisible_characters'] / max(excel_diff_count, 1) * 100):.2f}%",
-                f"{(sum(change_types[k] for k in ['half_full_width_only', 'whitespace_only',
-                                                  'unicode_normalization', 'invisible_characters']) / max(excel_diff_count, 1) * 100):.2f}%",
+                f"{(kana2_blank_count / len(df) * 100):.2f}%",
                 f"{(kanji_count / len(df) * 100):.2f}%",
-                f"{(numeric_hw_to_fw_count / len(df) * 100):.2f}%"
+                f"{(numeric_fw_to_hw_count / len(df) * 100):.2f}%",
+                f"{(symbol_to_kana_count / len(df) * 100):.2f}%",
+                f"{(symbol_width_change_count / len(df) * 100):.2f}%",
+                f"{(choume_count / len(df) * 100):.2f}%",
+                f"{(chou_count / len(df) * 100):.2f}%"
             ]
         })
 
-        # Create specialized analysis sheet for kanji and numeric conversions
+        # Create specialized analysis sheet for new conversions
         special_analysis_df = pd.DataFrame({
             'Analysis Type': [
+                'Rows where 住所カナ2 is blank',
                 'Rows where 住所カナ2 contains kanji',
-                'Rows where numbers changed from half-width to full-width'
+                'Rows where numbers changed from full-width to half-width',
+                'Rows where symbols changed to kana characters',
+                'Rows where symbols changed width (half to full or vice versa)'
             ],
             'Count': [
+                kana2_blank_count,
                 kanji_count,
-                numeric_hw_to_fw_count
+                numeric_fw_to_hw_count,
+                symbol_to_kana_count,
+                symbol_width_change_count
             ],
             'Percentage of Total': [
+                f"{(kana2_blank_count / len(df) * 100):.2f}%",
                 f"{(kanji_count / len(df) * 100):.2f}%",
-                f"{(numeric_hw_to_fw_count / len(df) * 100):.2f}%"
+                f"{(numeric_fw_to_hw_count / len(df) * 100):.2f}%",
+                f"{(symbol_to_kana_count / len(df) * 100):.2f}%",
+                f"{(symbol_width_change_count / len(df) * 100):.2f}%"
             ],
             'Percentage of Changes': [
+                f"{(kana2_blank_count / max(excel_diff_count, 1) * 100):.2f}%",
                 f"{(kanji_count / max(excel_diff_count, 1) * 100):.2f}%",
-                f"{(numeric_hw_to_fw_count / max(excel_diff_count, 1) * 100):.2f}%"
+                f"{(numeric_fw_to_hw_count / max(excel_diff_count, 1) * 100):.2f}%",
+                f"{(symbol_to_kana_count / max(excel_diff_count, 1) * 100):.2f}%",
+                f"{(symbol_width_change_count / max(excel_diff_count, 1) * 100):.2f}%"
             ]
         })
 
@@ -629,20 +625,28 @@ def main():
             df.to_excel(writer, sheet_name='Detailed Comparison', index=False)
             summary_df.to_excel(writer, sheet_name='Change Summary', index=False)
             encoding_analysis.to_excel(writer, sheet_name='Encoding Analysis', index=False)
-            special_analysis_df.to_excel(writer, sheet_name='Kanji and Numeric Analysis', index=False)
+            special_analysis_df.to_excel(writer, sheet_name='Special Analysis', index=False)
 
-            # If we found invisible characters, add that sheet too
-            if invisible_count > 0:
-                invisible_examples.to_excel(writer, sheet_name='Invisible Characters', index=False)
+            # Create sheets for examples of each special case
+            if kana2_blank_count > 0:
+                blank_examples = df[df['kana2_is_blank']].head(100).copy()
+                blank_examples.to_excel(writer, sheet_name='Blank Kana2 Examples', index=False)
 
-            # Create sheets for kanji and numeric examples
             if kanji_count > 0:
                 kanji_examples = df[df['contains_kanji']].head(100).copy()
                 kanji_examples.to_excel(writer, sheet_name='Kanji Examples', index=False)
 
-            if numeric_hw_to_fw_count > 0:
-                numeric_examples = df[df['numeric_halfwidth_to_fullwidth']].head(100).copy()
-                numeric_examples.to_excel(writer, sheet_name='Numeric HW to FW Examples', index=False)
+            if numeric_fw_to_hw_count > 0:
+                numeric_examples = df[df['numeric_fullwidth_to_halfwidth']].head(100).copy()
+                numeric_examples.to_excel(writer, sheet_name='FW to HW Examples', index=False)
+
+            if symbol_to_kana_count > 0:
+                symbol_examples = df[df['symbol_to_kana']].head(100).copy()
+                symbol_examples.to_excel(writer, sheet_name='Symbol to Kana Examples', index=False)
+
+            if symbol_width_change_count > 0:
+                width_examples = df[df['symbol_width_change']].head(100).copy()
+                width_examples.to_excel(writer, sheet_name='Symbol Width Change Examples', index=False)
 
         print(f"\nSaving results with summary to {output_path}...")
         print("Done!")
